@@ -1,15 +1,89 @@
-use pixels::{Pixels, SurfaceTexture};
-use std::error::Error;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
-const WIDTH_WINDOW: usize = 1920;
-const HEIGHT_WINDOW: usize = 1080;
-const WIDTH_GRID: usize = WIDTH_WINDOW / CELL_SIZE;
-const HEIGHT_GRID: usize = HEIGHT_WINDOW / CELL_SIZE;
-const PIXEL_SIZE: usize = 4;
-const CELL_SIZE: usize = 10;
+use error_iter::ErrorIter as _;
+use log::{debug, error};
+use pixels::{Error, Pixels, SurfaceTexture};
+use winit::event::VirtualKeyCode;
+use winit::{
+    dpi::LogicalSize,
+    event::{ElementState, Event, MouseButton, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
+use winit_input_helper::WinitInputHelper;
+
+const WIDTH: u32 = 400;
+const HEIGHT: u32 = 300;
+
+fn main() -> Result<(), Error> {
+    env_logger::init();
+    let event_loop = EventLoop::new();
+    let mut input = WinitInputHelper::new();
+
+    let window = {
+        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
+        let scaled_size = LogicalSize::new(WIDTH as f64 * 3.0, HEIGHT as f64 * 3.0);
+        WindowBuilder::new()
+            .with_title("Conway's Game of Life")
+            .with_inner_size(scaled_size)
+            .with_min_inner_size(size)
+            .build(&event_loop)
+            .unwrap()
+    };
+
+    let mut pixels = {
+        let window_size = window.inner_size();
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+        Pixels::new(WIDTH, HEIGHT, surface_texture)?
+    };
+
+    let mut game = GameOfLife::new(WIDTH as usize, HEIGHT as usize);
+    let mut paused = false;
+
+    event_loop.run(move |event, _, control_flow| {
+        if let Event::RedrawRequested(_) = event {
+            game.draw(pixels.frame_mut());
+            if let Err(e) = pixels.render() {
+                error!("pixels.render() failed: {}", e);
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+        }
+
+        if input.update(&event) {
+            if input.key_pressed(VirtualKeyCode::Escape) || input.close_requested() {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+            if input.key_pressed(VirtualKeyCode::P) {
+                paused = !paused;
+            }
+            if input.key_pressed_os(VirtualKeyCode::Space) {
+                paused = true;
+            }
+            if input.key_pressed(VirtualKeyCode::R) {
+                game.starting_position();
+            }
+            if let Some(size) = input.window_resized() {
+                if let Err(err) = pixels.resize_surface(size.width, size.height) {
+                    log_error("pixels.resize_surface", err);
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+            }
+            if !paused || input.key_pressed_os(VirtualKeyCode::Space) {
+                game.update();
+            }
+            window.request_redraw();
+        }
+    });
+}
+
+fn log_error<E: std::error::Error + 'static>(method_name: &str, err: E) {
+    error!("{method_name}() failed: {err}");
+    for source in err.sources().skip(1) {
+        error!("  Caused by: {source}");
+    }
+}
+
 struct GameOfLife {
     width: usize,
     height: usize,
@@ -64,6 +138,23 @@ impl GameOfLife {
         count
     }
 
+    fn draw(&self, screen: &mut [u8]) {
+        for row in 0..self.height {
+            for col in 0..self.width {
+                let index = (row * self.width + col) * 4;
+                let color = if self.cells[row][col] {
+                    [0x00, 0x00, 0x00]
+                } else {
+                    [0xFF, 0xFF, 0xFF]
+                };
+                screen[index] = color[0];
+                screen[index + 1] = color[1];
+                screen[index + 2] = color[2];
+                screen[index + 3] = 0xFF;
+            }
+        }
+    }
+
     fn draw_terminal(&self) {
         for row in 0..self.height {
             for col in 0..self.width {
@@ -102,69 +193,4 @@ impl GameOfLife {
             }
         }
     }
-
-    fn render(&self, frame: &mut [u8]) {
-        for (y, row) in self.cells.iter().enumerate() {
-            for (x, &cell) in row.iter().enumerate() {
-                for dy in 0..CELL_SIZE {
-                    for dx in 0..CELL_SIZE {
-                        let pixel_x = (x * CELL_SIZE + dx) * PIXEL_SIZE;
-                        let pixel_y = (y * CELL_SIZE + dy) * WIDTH_WINDOW * PIXEL_SIZE;
-                        let pixel_index = pixel_y + pixel_x;
-
-                        if pixel_index + PIXEL_SIZE <= frame.len() {
-                            let color = if cell {
-                                [0x00, 0x00, 0x00, 0xff] // Black
-                            } else {
-                                [0xff, 0xff, 0xff, 0xff] // White
-                            };
-                            frame[pixel_index..pixel_index + PIXEL_SIZE].copy_from_slice(&color);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn toggle_state(&mut self, row: usize, col: usize) {
-        self.cells[row][col] = !self.cells[row][col];
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Conway's Game of Life")
-        .with_inner_size(LogicalSize::new(WIDTH_WINDOW as f32, HEIGHT_WINDOW as f32))
-        .build(&event_loop)?;
-
-    let window_size = window.inner_size();
-    let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-    let mut pixels = Pixels::new(WIDTH_WINDOW as u32, HEIGHT_WINDOW as u32, surface_texture)?;
-
-    let mut grid = GameOfLife::new(WIDTH_GRID, HEIGHT_GRID);
-    grid.starting_position();
-
-    event_loop.run(move |event, _, control_flow| {
-        match event {
-            Event::RedrawRequested(_) => {
-                grid.update();
-                grid.render(pixels.get_frame_mut());
-                if pixels.render().is_err() {
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                *control_flow = ControlFlow::Exit;
-            }
-            _ => (),
-        }
-
-        // Request the next frame.
-        window.request_redraw();
-    });
 }
